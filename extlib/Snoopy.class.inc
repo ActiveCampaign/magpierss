@@ -471,8 +471,10 @@ class Snoopy
 		$headers .= "\r\n";
 		
 		// set the read timeout if needed
-		if ($this->read_timeout > 0)
+		if ($this->read_timeout > 0) {
+			@stream_set_blocking($fp, 1);
 			socket_set_timeout($fp, $this->read_timeout);
+		}
 		$this->timed_out = false;
 		
 		fwrite($fp,$headers.$body,strlen($headers.$body));
@@ -482,18 +484,58 @@ class Snoopy
 		
 		// content was returned gzip encoded?
 		$is_gzipped = false;
-						
-		while($currentHeader = fgets($fp,$this->_maxlinelen))
-		{
+
+$GLOBALS['dbgarr'] = array();
+$GLOBALS['dbgarr'][] = $info;
+		// set the read timeout AGAIN
+		if ($this->read_timeout > 0) {
+			@stream_set_blocking($fp, 1);
+			socket_set_timeout($fp, $this->read_timeout);
+		}
+		$str = "";
+		$didheaders = false;
+		$info = stream_get_meta_data($fp);
+		while( $chunk = fread($fp, $this->_maxlinelen) ) {
+		//while ( !feof($fp) && !$info['timed_out'] ) {
+		//	$chunk = fread($fp, $this->_maxlinelen);
+		//	$info = stream_get_meta_data($fp);
+		//	if ( $chunk === false ) { sleep(1); continue; }
+$GLOBALS['dbgarr'][] = 'inheaderloop';
+$GLOBALS['dbgarr'][] = $str;
+$GLOBALS['dbgarr'][] = $chunk;
 			if ($this->read_timeout > 0 && $this->_check_timeout($fp))
 			{
 				$this->status=-100;
 				return false;
 			}
+
+			$lines = preg_split("/\r?\n/", $str . $chunk);
+			if ( !$lines ) $lines = preg_split("/\r/", $str . $chunk);
+			foreach ( $lines as $currentHeader ) {
+$GLOBALS['dbgarr'][] = 'inlineloop';
+$GLOBALS['dbgarr'][] = $currentHeader;
+				if ( !trim($currentHeader) and !$didheaders ) {
+$GLOBALS['dbgarr'][] = 'FOUND HEADER DELIM';
+					$didheaders = true;
+					$str = "";
+					continue;
+				}
+		
+				if ( $didheaders ) {
+					if ( $str ) $str .= "\n";
+					$str .= $currentHeader;
+				} else {
+					$str = $currentHeader;
+					
+					
+					$currentHeader .= "\n";
+
+		//while(($currentHeader = fgets($fp,$this->_maxlinelen)) !== false)
+		//{
 				
 		//	if($currentHeader == "\r\n")
-			if(preg_match("/^\r?\n$/", $currentHeader) )
-			      break;
+		//	if(preg_match("/^\r?\n$/", $currentHeader) )
+		//	      break;
 						
 			// if a header begins with Location: or URI:, set the redirect
 			if(preg_match("/^(Location:|URI:)/i",$currentHeader))
@@ -529,23 +571,44 @@ class Snoopy
 			}
 			
 			$this->headers[] = $currentHeader;
+		} // outer if $didheaders
+		} // outer loop - foreach line
+		if ( $didheaders ) break;
+		} // outer loop - while fread
+$GLOBALS['dbgarr'][] = $chunk;
+$GLOBALS['dbgarr'][] = 'headerdone';
+
+		if ($this->read_timeout > 0 && $this->_check_timeout($fp))
+		{
+			$this->status=-100;
+			return false;
 		}
 
 		# $results = fread($fp, $this->maxlength);
 		$results = "";
-		while ( $data = fread($fp, $this->maxlength) ) {
-		    $results .= $data;
-		    if (
-		        strlen($results) > $this->maxlength ) {
-		        break;
-		    }
+	//	while ( $data = fread($fp, $this->maxlength) ) {
+	//	    $results .= $data;
+		while( $chunk = fread($fp, $this->_maxlinelen) ) {
+$GLOBALS['dbgarr'][] = 'inbodyloop';
+$GLOBALS['dbgarr'][] = $str;
+$GLOBALS['dbgarr'][] = $chunk;
+			$results .= $str . $chunk;
+			$str = "";
+
+			if ( strlen($results) > $this->maxlength ) {
+				break;
+			}
 		}
+		
+		if ( $str ) $results .= $str;
 		
 		// gunzip
 		if ( $is_gzipped ) {
 			// per http://www.php.net/manual/en/function.gzencode.php
-			$results = substr($results, 10);
-			$results = gzinflate($results);
+			//$results = substr($results, 10);
+			//$results = gzinflate($results);
+			require_once ac_global_pear('HTTP/Request.php');
+			$results = HTTP_Response::_decodeGzip($results);
 		}
 		
 		if ($this->read_timeout > 0 && $this->_check_timeout($fp))
@@ -634,30 +697,32 @@ class Snoopy
 			else
 				$headers[] = "Content-type: $content_type";
 		}
-		if(!empty($body))	
-			$headers[] = "Content-length: ".strlen($body);
-#		if(!empty($this->user) || !empty($this->pass))	
-#			$headers[] = "Authorization: BASIC ".base64_encode($this->user.":".$this->pass);
-			
-		if ($this->user and $this->pass) {
-			$cmdline_params .= " -u '$this->user:$this->pass' ";
-		}
-		
-		for($curr_header = 0; $curr_header < count($headers); $curr_header++) {
-			$cmdline_params .= " -H \"".$headers[$curr_header]."\"";
-		}
-			  	                         
 		if(!empty($body))
-			$cmdline_params .= " -d \"$body\"";
-		
+			$headers[] = "Content-length: ".strlen($body);
+		if(!empty($this->user) || !empty($this->pass))
+			$headers[] = "Authorization: BASIC ".base64_encode($this->user.":".$this->pass);
+
+		for($curr_header = 0; $curr_header < count($headers); $curr_header++) {
+			$cmdline_params .= " -H ".escapeshellarg($headers[$curr_header]);
+		}
+
+		if(!empty($body))
+			$cmdline_params .= " -d " . escapeshellarg($body);
+
 		if($this->read_timeout > 0)
 			$cmdline_params .= " -m ".$this->read_timeout;
-		
+
 		$headerfile = uniqid(time());
-		
+
+
 		# accept self-signed certs
-		$cmdline_params .= " -k"; 
-		exec($this->curl_path." -D \"/tmp/$headerfile\"".escapeshellcmd($cmdline_params)." ".escapeshellcmd($URI),$results,$return);
+		$cmdline_params .= " -k";
+
+		if($this->use_gzip) {
+			$cmdline_params .= " --compressed ";
+		}
+
+		exec($this->curl_path." -D \"/tmp/$headerfile\"".$cmdline_params." ".escapeshellcmd($URI),$results,$return);
 		
 		if($return)
 		{
